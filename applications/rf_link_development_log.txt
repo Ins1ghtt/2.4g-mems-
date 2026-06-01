@@ -1,0 +1,367 @@
+RF Link Development Log
+=======================
+
+2026-04-16 - Dual-core IPC base and RF application split
+What changed:
+- Added applications/rf_link_tx as a dual-core sysbuild application.
+- Added applications/rf_link_tx/flpr_app as the cpuflpr LP child image.
+- Added applications/rf_link_rx as the single-core receiver application.
+- Added common frame structure in rf_link_tx/src/proto.h and rf_link_rx/src/proto.h.
+Why:
+- Keep the final acquisition-side structure close to the planned HP/LP split.
+- Keep RX simple so link issues are easier to isolate.
+Observed:
+- TX/RX build with NCS v3.1.0 and nRF54L15 Connect Kit board targets.
+Result:
+- Basic compile-level application structure is present.
+Next:
+- Bring up IPC, ESB, and serial statistics.
+
+2026-04-16 - LP fake sampling and HP IPC receive path
+What changed:
+- flpr_app/src/adc_sampler.c generates deterministic 16-bit sample frames.
+- flpr_app/src/ipc_tx.c sends complete rf_frame payloads through ipc_service.
+- rf_link_tx/src/ipc_bridge.c receives and validates IPC frames on HP.
+- rf_link_tx/src/tx_queue.c buffers HP-side frames before RF send.
+Why:
+- Use fake data first so ADC driver work is not mixed with RF bring-up.
+- Keep a queue boundary between IPC receive and RF send.
+Observed:
+- HP receives LP frames and can enqueue them.
+Result:
+- LP -> IPC -> HP pipeline established.
+Next:
+- Add ESB PTX/PRX link and RX-side statistics.
+
+2026-04-16 - First ESB private 2.4 GHz link
+What changed:
+- rf_link_tx/src/radio_link.c configures ESB PTX on channel 40.
+- rf_link_rx/src/radio_link.c configures ESB PRX with matching parameters.
+- rf_link_rx/src/rx_reorder.c checks magic, size, sequence, lost frames, and samples.
+- Debug output uses uart_poll_out() instead of printk.
+Why:
+- ESB gives ACK/retransmission and is faster to validate than a bare RADIO state machine.
+- Direct UART was already proven more reliable for this dual-core setup.
+Observed:
+- RX prints frames, samples, bps, lost, dup, bad, seq, first, and last.
+Result:
+- Private 2.4 GHz path is functional.
+Next:
+- Record CSV stats and add latency measurements.
+
+2026-04-19 - MAC latency and CSV capture
+What changed:
+- rf_link_tx/src/radio_link.c measures MAC latency from esb_write_payload() to completion.
+- rf_link_tx/src/main.c prints mac_cnt, mac_last_us, mac_min_us, mac_avg_us, mac_max_us.
+- save_serial_csv.py parses TX stat and RX stat lines into CSV.
+- RX UART output was kept to application statistics only, not raw sample dumps.
+Why:
+- Need latency data without polluting the UART with payload samples.
+- CSV output is needed for later paper/patent experiment records.
+Observed:
+- TX prints MAC latency statistics.
+- RX output remains compact and machine-parseable.
+Result:
+- PC-side CSV capture can record both TX and RX status streams.
+Next:
+- Run sustained 50 kbps and higher-throughput tests.
+
+2026-04-19 - 50 ksps x 16-bit stress setting
+What changed:
+- rf_link_tx/src/proto.h changed TX period from 10 ms to 640 us.
+- rf_link_tx/flpr_app/src/main.c now sleeps with K_USEC(RF_LINK_TX_PERIOD_US).
+Why:
+- 32 samples per frame at 640 us/frame equals 50 ksps.
+Observed:
+- RX effective payload is about 286 to 306 kbps, not 800 kbps.
+- RX lost counter rises quickly.
+- TX q_drop rises quickly while rf_fail stays low.
+- TX MAC latency min/avg is about 1087/1574 us, longer than 640 us.
+Result:
+- Current 1 Mbps ESB + ACK configuration is throughput-limited for 50 ksps.
+Next:
+- Evaluate 2 Mbps/4 Mbps PHY, reduced ACK overhead, larger frames, or streaming no-ACK mode.
+
+2026-04-23 - v0.5 RF throughput optimization build
+What changed:
+- rf_link_tx/src/proto.h and rf_link_rx/src/proto.h increased frame payload from 32 to 96 samples.
+- rf_link_tx/src/proto.h and rf_link_rx/src/proto.h set the 50 ksps period to 1920 us and status period to 1000 ms.
+- rf_link_tx/src/radio_link.c and rf_link_rx/src/radio_link.c select ESB 4 Mbps on nRF54L15, with 2 Mbps fallback.
+- rf_link_tx/src/radio_link.c sends streaming payloads with no-ACK and disables retransmission count.
+- rf_link_rx/src/radio_link.c enables matching selective auto-ACK configuration for no-ACK payload handling.
+- rf_link_tx/src/tx_queue.c increases HP queue depth from 16 to 64 frames.
+- rf_link_tx/flpr_app/src/main.c removes the LP software queue from the active path and sends generated frames directly over IPC.
+- rf_link_tx/flpr_app/src/ipc_tx.c reduces IPC retry sleep from 1 ms to 50 us.
+- rf_link_tx/flpr_app/CMakeLists.txt stops building the inactive sample_buffer.c helper.
+- rf_link_tx/src/main.c changes TX status printing from packet-count-based to 1000 ms time-based output and shortens RF send timeout to 5 ms.
+- rf_link_rx/src/main.c changes RX status output to the shared 1000 ms status period.
+- rf_link_tx/prj.conf and rf_link_rx/prj.conf raise ESB max payload and FIFO sizes for 204-byte frames.
+Why:
+- v0.4 showed the 1 Mbps ACK path had MAC latency longer than the 640 us production period.
+- Larger frames reduce packet rate from 1562.5 pps to about 520.8 pps for the same 50 ksps payload.
+- No-ACK streaming removes ACK turnaround from the payload data path.
+Observed:
+- TX dual-core sysbuild completes successfully.
+- RX single-core build completes successfully.
+Result:
+- v0.5 firmware is ready for hardware UART/CSV throughput measurement.
+Next:
+- Flash both boards, capture TX/RX CSV for at least 60 seconds, and update EXP-001 with actual bps, lost, q_drop, and latency.
+
+2026-04-24 - Zero-throughput debug closure for the 204-byte IPC/RF path
+What changed:
+- rf_link_tx/flpr_app/src/ipc_tx.c now accepts both return 0 and returned byte count as successful ipc_service_send() results, and retries -ENOMEM, -EAGAIN, -EBUSY, and -ENOBUFS.
+- rf_link_tx/src/lp_trace.h plus both TX overlay files add a shared LP trace area with boot, stage, sequence, IPC, and fatal counters.
+- rf_link_tx/src/main.c prints ipc_bad_size, ipc_bad_magic, lp_stage, lp_boots, lp_fatal, lp_fatal_reason, lp_loop, lp_seq, lp_ok, lp_busy, lp_fail, and lp_ret.
+- rf_link_rx/src/main.c prints rf_evt, rf_frames, and rf_read_err so "no packets on air" and "packets read but rejected" are separated.
+- rf_link_tx/src/fatal_diag.c and rf_link_tx/flpr_app/src/fatal_diag.c add HP fatal UART output and LP fatal trace capture; both TX CMakeLists now build these sources.
+- rf_link_tx/prj.conf and rf_link_tx/flpr_app/prj.conf set CONFIG_PBUF_RX_READ_BUF_SIZE=256, and rf_link_tx/src/proto.h asserts that the PBUF RX buffer is not smaller than the 204-byte wire frame.
+Why:
+- After the v0.5 parameter change, TX first showed LP IPC bound but no frames were forwarded to RF, and RX stayed at zero.
+- After the first IPC-side fix, TX exposed HP fatal reason=4 during ipc_bridge_init(), which pointed to an ICMSG-side assertion instead of an RF problem.
+Observed:
+- On Zephyr ICMSG, ipc_service_send() success can return the sent byte count instead of 0.
+- Once real 204-byte frames started flowing, the default 128-byte PBUF RX buffer caused an ICMSG-side assert and TX restart.
+Result:
+- TX now reaches lp_stage=4 with sent=ipc_rx=queued=rf_ok and q_drop=0 in stable excerpts.
+- RX now reports frames, samples, and payload bitrate instead of staying at zero.
+Next:
+- Remove the remaining throughput gap between the requested 1920 us period and the measured payload rate.
+
+2026-04-24 - Absolute deadline pacing closes the remaining 50 ksps gap
+What changed:
+- rf_link_tx/flpr_app/src/main.c now supports absolute-deadline pacing based on k_cycle_get_64().
+- rf_link_tx/src/proto.h adds the RF_LINK_LP_USE_ABSOLUTE_PACING switch so deadline pacing can be disabled without reverting code.
+- rf_link_tx/src/main.c prints lp_pace=deadline or lp_pace=relative at boot.
+Why:
+- Relative k_sleep(K_USEC(1920)) made the real frame period equal to processing time plus 1920 us, which limited stable payload to about 504 fps or about 774 kbps.
+Observed:
+- Before deadline pacing, TX and RX were healthy but payload rate still lagged the 800 kbps target by about 3 percent.
+- After deadline pacing, operator bench runs reported the firmware stable near the 50 ksps x 16-bit target.
+Result:
+- The current working state is close to a full 16-bit x 50 ksps transport path.
+Next:
+- Capture longer-duration CSV evidence and replace the fake sampler with ADC DMA when the acquisition side is ready.
+
+2026-04-24 - v0.6 RX binary sample stream export
+What changed:
+- applications/rf_link_rx/src/rx_sample_stream.c and rx_sample_stream.h add an optional accepted-frame binary export path on uart30.
+- applications/rf_link_rx/stream.conf enables the export mode, sets uart30 to 2000000 baud at runtime, and enables UART runtime configure support.
+- applications/rf_link_rx/src/rx_reorder.c now taps each accepted rf_frame into the optional stream queue.
+- applications/rf_link_rx/src/main.c keeps the default statistics-only build unchanged and suppresses text RX status output when stream mode is active.
+- dump_rx_frames.py captures the binary records on the PC side and saves one CSV row per accepted RF frame under 2.4g_results.
+- applications/rf_link_rx/sample.yaml adds a build-only stream variant so CI can compile the export mode explicitly.
+Why:
+- save_serial_csv.py only stores UART statistics, not real received samples.
+- Future ADC integration and downstream processing need a host-visible export path for accepted RF frames.
+- The default stable RF link should remain untouched until stream mode is explicitly requested.
+Observed:
+- The default build_rf_link_rx build still succeeds and produces merged.hex.
+- A dedicated stream.conf build also succeeds locally.
+- dump_rx_frames.py passes record-format self-test with the firmware-side 224-byte binary record.
+Result:
+- v0.6 adds a real RX sample export path without changing the default link structure or default statistics workflow.
+Next:
+- Flash the stream build to RX, capture COM7 at 2000000 baud, and verify on hardware that stream_drop_total stays low while RF throughput remains stable.
+
+Detailed Version Notes
+======================
+
+Version focus: v0.5 throughput optimization and bring-up closure
+---------------------------------------------------------------
+
+Goal
+- Carry `16-bit * 50 ksps = 800000 bps` of useful sample payload.
+- Keep the TX architecture as `LP generate -> IPC -> HP queue -> ESB PTX`.
+
+Why v0.4 could not reach the target
+- `v0.4` used `32 samples/frame` and `640 us/frame`.
+- That means each frame carried `32 * 16 = 512` payload bits.
+- The required packet rate was `800000 / 512 = 1562.5 pps`.
+- Measured TX MAC latency was about `1087 us min` and `1574 us avg`, already
+  longer than the requested `640 us` frame period.
+- So the bottleneck was not first a radio-quality problem; it was that the
+  whole send path could not drain frames quickly enough.
+
+Main optimization idea in v0.5
+- Reduce packet rate while keeping the same payload target.
+- Move from `32` to `96` samples per frame:
+  - one frame now carries `96 * 16 = 1536` payload bits
+  - target packet rate becomes `800000 / 1536 = 520.8 pps`
+- Increase air-interface headroom at the same time:
+  - `1 Mbps + ACK` -> `4 Mbps preferred + no-ACK`
+- Reduce software-path overhead:
+  - LP inactive software queue removed from the hot path
+  - LP sends generated frames directly into IPC
+  - HP TX queue depth and ESB payload/FIFO sizes increased
+
+Code-level v0.5 direction
+- Protocol and rate parameters:
+  - `applications/rf_link_tx/src/proto.h`
+  - `applications/rf_link_rx/src/proto.h`
+  - frame payload changed to `96` samples
+  - TX period changed to `1920 us`
+- RF mode changes:
+  - `applications/rf_link_tx/src/radio_link.c`
+  - `applications/rf_link_rx/src/radio_link.c`
+  - ESB changed to `4 Mbps preferred`
+  - payload path changed to `no-ACK`
+- Queue and runtime sizing:
+  - `applications/rf_link_tx/src/tx_queue.c`
+  - `applications/rf_link_tx/prj.conf`
+  - `applications/rf_link_rx/prj.conf`
+  - HP queue depth, ESB max payload, and FIFO sizes increased
+- LP hot-path simplification:
+  - `applications/rf_link_tx/flpr_app/src/main.c`
+  - `applications/rf_link_tx/flpr_app/CMakeLists.txt`
+  - direct frame generation to IPC send path
+
+Why TX once looked dead while RX stayed zero
+- After the v0.5 parameter change, TX initially showed no useful RF progress
+  and RX stayed at `frames=0 samples=0 bps=0`.
+- That symptom looked like a radio failure, but the real issue was inside the
+  IPC path.
+
+Zero-throughput debug logic
+- First question: did LP still generate frames
+  - solved by adding LP shared trace counters
+- Second question: did HP receive IPC frames
+  - solved by adding `ipc_bad_size`, `ipc_bad_magic`, and `ipc_rx`
+- Third question: did frames reach the air
+  - solved by keeping TX `rf_ok/rf_fail/rf_timeout/rf_err`
+- Fourth question: did RX see air traffic but reject frames
+  - solved by adding `rf_evt`, `rf_frames`, and `rf_read_err` on RX
+- Fatal-path visibility:
+  - `applications/rf_link_tx/src/fatal_diag.c`
+  - `applications/rf_link_tx/flpr_app/src/fatal_diag.c`
+  - HP could now print `HP fatal reason=...`
+  - LP could now store fatal counters in shared trace memory
+
+Actual root cause 1: ICMSG send success was interpreted incorrectly
+- File:
+  - `applications/rf_link_tx/flpr_app/src/ipc_tx.c`
+- Problem:
+  - LP treated only return `0` from `ipc_service_send()` as success
+- Reality:
+  - Zephyr ICMSG may return the sent byte count on success
+- Fix:
+  - accept both `0` and `sizeof(frame)` as success
+  - retry `-ENOMEM`, `-EAGAIN`, `-EBUSY`, and `-ENOBUFS`
+
+Actual root cause 2: ICMSG default PBUF RX buffer was too small
+- New wire frame size:
+  - `204 bytes`
+- Zephyr default:
+  - `CONFIG_PBUF_RX_READ_BUF_SIZE=128`
+- Result:
+  - once real 204-byte traffic started, ICMSG asserted internally and TX hit
+    `HP fatal reason=4`
+- Fix:
+  - `applications/rf_link_tx/prj.conf`
+  - `applications/rf_link_tx/flpr_app/prj.conf`
+  - set `CONFIG_PBUF_RX_READ_BUF_SIZE=256`
+  - `applications/rf_link_tx/src/proto.h`
+  - add compile-time assert so future frame growth cannot silently exceed PBUF
+
+Stable intermediate state after IPC/PBUF fixes
+- Example stable excerpt:
+  - `TX stat sent=51857 ipc_rx=51857 queued=51857 q_drop=0 ...`
+  - `RX stat ... bps=774144 lost=0 ...`
+- Meaning:
+  - LP generation, IPC receive, HP queueing, and RF send were all in lockstep
+  - the remaining issue was not corruption or packet loss in the active path
+
+Why there was still a 3 percent gap
+- With `96 samples/frame` and `1920 us` target period:
+  - target packet rate is `520.8 pps`
+- But the stable excerpt gave:
+  - `774144 / 1536 = 504 pps`
+- Reason:
+  - LP used relative `k_sleep(K_USEC(1920))`
+  - real frame period became `processing time + 1920 us`
+
+Final timing fix
+- File:
+  - `applications/rf_link_tx/flpr_app/src/main.c`
+- Change:
+  - use `k_cycle_get_64()` and absolute deadline pacing
+  - every loop targets the next fixed timestamp instead of sleeping a constant
+    delay after work completes
+- Control switch:
+  - `applications/rf_link_tx/src/proto.h`
+  - `RF_LINK_LP_USE_ABSOLUTE_PACING`
+  - set to `0` to return to the old relative pacing without reverting code
+
+Current understanding
+- The final near-800 kbps state was not achieved by only changing PHY and ACK.
+- It required all of the following together:
+  - larger frames
+  - lower packet rate
+  - no-ACK high-rate RF mode
+  - direct LP->IPC hot path
+  - corrected ICMSG send semantics
+  - correct PBUF sizing for 204-byte frames
+  - absolute-deadline pacing on LP
+
+Version focus: v0.6 RX sample stream export
+-------------------------------------------
+
+Goal
+- Export real accepted RX frames to the host PC without rewriting the RF link.
+- Keep the default `RX stat ...` workflow unchanged unless export mode is enabled.
+- Prepare a stable handoff path for future real ADC data and downstream processing.
+
+Why the old UART statistics path was not enough
+- `save_serial_csv.py` records only `RX stat ...` and `TX stat ...`.
+- The RX firmware printed counters and sample boundaries, not the 96-sample payload array.
+- Even after replacing the fake TX sampler with real ADC, the old statistics UART would still not expose full sample data.
+
+Design choice for v0.6
+- Do not stream raw samples from the RF callback directly.
+- Keep RX validation and sequence/loss accounting in place.
+- After a frame is accepted, copy it into a small buffered export queue.
+- Drain that queue from a dedicated thread that writes fixed-size binary records on uart30.
+- Keep this path behind `CONFIG_RF_LINK_RX_SAMPLE_STREAM` so the default build remains the current stable one.
+
+Why not keep using text UART output
+- `16-bit * 50 ksps` payload is about `800 kbps` before any UART framing overhead.
+- Text CSV on UART would consume much more bandwidth than the RF payload itself.
+- A binary fixed-size record is much closer to the real payload size and is easier to parse reliably.
+
+Code-level v0.6 direction
+- RX firmware:
+  - `applications/rf_link_rx/src/rx_sample_stream.c`
+  - `applications/rf_link_rx/src/rx_sample_stream.h`
+  - `applications/rf_link_rx/src/rx_reorder.c`
+  - `applications/rf_link_rx/src/main.c`
+- Build/config:
+  - `applications/rf_link_rx/stream.conf`
+  - `applications/rf_link_rx/sample.yaml`
+- Host capture:
+  - `dump_rx_frames.py`
+
+Binary record format
+- Each UART export record is fixed at `224 bytes`.
+- Record layout:
+  - stream magic
+  - record length
+  - stream version
+  - stream frame index
+  - cumulative stream drop count
+  - RX uptime in ms
+  - one complete `rf_frame`
+- The PC script resynchronizes on the stream magic and writes one CSV row per RF frame.
+
+How v0.6 keeps the current link stable
+- Default `build_rf_link_rx` still prints `RX stat ...` at 115200 baud.
+- Stream export is enabled only through `stream.conf`.
+- The RF path, protocol, queueing, and TX side are unchanged.
+- The only hot-path addition is one bounded copy into a non-blocking queue after frame acceptance.
+
+Current limitation
+- v0.6 is validated locally at build and parser-format level.
+- Hardware validation of continuous stream capture is still needed.
+- The first hardware check should confirm:
+  - RF throughput remains near the current working state
+  - `stream_drop_total` remains low during capture
+  - the PC can sustain long CSV writes at the chosen baud
