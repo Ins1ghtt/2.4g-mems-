@@ -1,21 +1,7 @@
 # 2.4g-mems-
 在宋仓库的基础上对rx_link_tx修改，实现从IIM-42352传感器到nrf54l15的数据通路，采用fifo半满逻辑，传输速率2.4m左右
- LP 核 (FLPR /cpuflpr)
-adc_sampler.c: 假数据 → IIM-42352 FIFO 半满中断模式
-prj.conf: +SPI +GPIO +WORKQUEUE_STACK
-overlay: +SPI00 pinctrl +IIM-42352 device node
-HP 核 (cpuapp)
-main.c: +send_binary_frame () 二进制帧串口输出
-debug_uart: +write_raw () 原始字节流支持
-proto.h: 采样率 50kHz → 12kHz (真实 4kHz×3 轴)
-overlay: +spi00 disabled (让给 FLPR)
-工具链
-save_mems_binary.py (串口→.bin 采集)
-view_mems.py (帧数据查看)
-.vscode/settings.json
-
-//详细内容如下
-# 工程差异说明
+核心变更内容概述放在文末
+ # 工程差异说明
 
 ## 概述
 
@@ -176,3 +162,31 @@ void debug_uart_write_raw(const uint8_t *data, uint32_t len);
 - 根目录脚本：`dump_rx_frames.py`、`export_fake_adc_csv.py`、`save_serial_csv.py`
 
 ---
+
+## 五、变更总结
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  LP核 (FLPR / cpuflpr)                                      │
+│  ┌───────────────────────────────────────────────────────┐  │
+│  │ adc_sampler.c: 假数据 → IIM-42352 FIFO 半满中断模式  │  │
+│  │ prj.conf: +SPI +GPIO +WORKQUEUE_STACK               │  │
+│  │ overlay: +SPI00 pinctrl +IIM-42352 device node       │  │
+│  └───────────────────────────────────────────────────────┘  │
+│                                                             │
+│  HP核 (cpuapp)                                              │
+│  ┌───────────────────────────────────────────────────────┐  │
+│  │ main.c: +send_binary_frame() 二进制帧串口输出        │  │
+│  │ debug_uart: +write_raw() 原始字节流支持              │  │
+│  │ proto.h: 采样率 50kHz → 12kHz (真实 4kHz×3轴)        │  │
+│  │ overlay: +spi00 disabled (让给 FLPR)                 │  │
+│  └───────────────────────────────────────────────────────┘  │
+│                                                             │
+│  工具链                                                     │
+│  ┌───────────────────────────────────────────────────────┐  │
+│  │ +save_mems_binary.py (串口→.bin采集)                 │  │
+│  │ +view_mems.py (帧数据查看)                           │  │
+│  │ +.vscode/settings.json                               │  │
+│  └───────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────┘
+```
